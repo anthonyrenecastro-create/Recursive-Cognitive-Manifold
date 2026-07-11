@@ -9,6 +9,10 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,7 +20,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
@@ -48,6 +52,10 @@ jobs:
           assert 'benchmarks' in report and isinstance(report['benchmarks'], dict), 'Benchmark payload missing'
           print('Benchmark metadata validation passed.')
           PY
+
+      - name: Compare against stored benchmark baseline
+        run: |
+          python scripts/ci/compare_benchmark_baseline.py
 
       - name: Demo smoke test
         run: |

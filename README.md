@@ -14,7 +14,7 @@ pip install -r requirements.txt
 
 Reference environment:
 
-- Python 3.12+
+- Python 3.11+
 - Linux/macOS/WSL (validated in Ubuntu CI)
 
 Recommended local install flow:
@@ -90,6 +90,17 @@ Interpret geometry feedback metric in benchmark JSON:
 - `benchmarks.geometry_feedback_gain.gain_delta`: additive gain (`enabled_score - disabled_score`)
 - `benchmarks.geometry_feedback_gain.gain_ratio`: relative gain (`enabled_score / disabled_score`)
 - Positive delta or ratio > 1.0 indicates net benefit from geometry feedback for that benchmark run.
+
+CI baseline regression policy:
+
+- Every CI run compares benchmark output against the stored baseline at `benchmarks/ci_baseline_seed_42.json`.
+- The comparison script (`scripts/ci/compare_benchmark_baseline.py`) prints current, baseline, and difference for tracked metrics.
+- CI fails when a tracked metric exceeds its configured regression tolerance.
+
+Stable module namespaces:
+
+- Treat `rcm.memory`, `rcm.geometry`, and `rcm.cognition` as stable public namespaces.
+- Avoid renaming or relocating these modules without explicit migration planning and compatibility updates.
 
 ## CI Pipeline
 
