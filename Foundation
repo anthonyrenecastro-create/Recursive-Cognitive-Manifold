@@ -1,0 +1,189 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
+from scipy.spatial import Delaunay
+from scipy.sparse import coo_matrix
+from collections import defaultdict, deque
+import time
+
+class HalfEdge:
+    __slots__ = ['origin', 'twin', 'next', 'face']
+    def __init__(self, origin_idx: int):
+        self.origin = origin_idx
+        self.twin = None
+        self.next = None
+        self.face = None
+
+class DynamicSimplicialComplex:
+    def __init__(self, vertices: np.ndarray, faces: np.ndarray):
+        self.vertices = np.pad(vertices, ((0, 0), (0, 1)), mode='constant') if vertices.shape[1] == 2 else vertices
+        self.n_vertices = len(self.vertices)
+        self.half_edges = {}
+        self._current_faces = []
+        self._build_half_edge_structure(faces)
+        self.L = self.compute_cotangent_laplacian()
+
+    def _build_half_edge_structure(self, faces):
+        self.half_edges.clear()
+        self._current_faces = [tuple(f) for f in faces]
+        for f_idx, face in enumerate(self._current_faces):
+            edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])]
+            hes = []
+            for (u, v) in edges:
+                he = HalfEdge(u)
+                he.face = f_idx
+                self.half_edges[(u, v)] = he
+                hes.append(he)
+                if (v, u) in self.half_edges:
+                    twin_he = self.half_edges[(v, u)]
+                    he.twin, twin_he.twin = twin_he, he
+            hes[0].next, hes[1].next, hes[2].next = hes[1], hes[2], hes[0]
+
+    def get_faces(self):
+        unique_faces = {he.face for he in self.half_edges.values() if he.face is not None}
+        return np.array([self._current_faces[i] for i in unique_faces if i < len(self._current_faces)])
+
+    def compute_topology_invariants(self):
+        V = self.n_vertices
+        E = len({tuple(sorted(k)) for k in self.half_edges.keys()})
+        recon_faces = self.get_faces()
+        F = len(recon_faces)
+        chi = V - E + F
+
+        # BFS for components
+        visited = set()
+        comps = 0
+        for i in range(V):
+            if i not in visited:
+                comps += 1
+                q = deque([i])
+                visited.add(i)
+                while q:
+                    curr = q.popleft()
+                    for neighbor in {k[1] for k in self.half_edges.keys() if k[0] == curr}:
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            q.append(neighbor)
+
+        return {
+            'chi': chi, 'V': V, 'E': E, 'F': F,
+            'num_nonmanifold_vertices': len(self._get_nonmanifold_vertices()),
+            'num_nonmanifold_edges': len(self._get_nonmanifold_edges()),
+            'is_orientable': self._is_orientable(),
+            'num_components': comps
+        }
+
+    def _get_nonmanifold_edges(self):
+        counts = defaultdict(int)
+        for u, v in self.half_edges.keys():
+            counts[tuple(sorted((u, v)))] += 1
+        return [e for e, c in counts.items() if c > 2]
+
+    def _get_nonmanifold_vertices(self):
+        nm_verts = []
+        for i in range(self.n_vertices):
+            outgoing = [he for k, he in self.half_edges.items() if k[0] == i]
+            if not outgoing: continue
+            rings, visited = 0, set()
+            for start_he in outgoing:
+                if start_he not in visited:
+                    rings += 1
+                    curr = start_he
+                    while curr and curr not in visited:
+                        visited.add(curr)
+                        curr = curr.twin.next if (curr.twin and curr.twin.next) else None
+                        if curr == start_he: break
+            if rings > 1: nm_verts.append(i)
+        return nm_verts
+
+    def _is_orientable(self):
+        face_orient = {}
+        hes = set(self.half_edges.values())
+        while hes:
+            start = hes.pop()
+            if start.face is None: continue
+            q = deque([(start, True)])
+            while q:
+                curr, orient = q.popleft()
+                if curr.face is not None:
+                    if curr.face in face_orient:
+                        if face_orient[curr.face] != orient: return False
+                    else:
+                        face_orient[curr.face] = orient
+                for nxt in [curr.next, curr.next.next]:
+                    if nxt in hes:
+                        hes.discard(nxt)
+                        q.append((nxt, orient))
+                if curr.twin and curr.twin in hes:
+                    hes.discard(curr.twin)
+                    q.append((curr.twin, not orient))
+        return True
+
+    def repair_nonmanifold_vertex(self, v_idx):
+        outgoing = [he for k, he in self.half_edges.items() if k[0] == v_idx]
+        fans = []
+        unvisited = set(outgoing)
+        while unvisited:
+            start = unvisited.pop()
+            fan, q = [], deque([start])
+            while q:
+                curr = q.popleft()
+                fan.append(curr)
+                nxt = curr.twin.next if (curr.twin and curr.twin.next and curr.twin.next.origin == v_idx) else None
+                if nxt in unvisited:
+                    unvisited.discard(nxt)
+                    q.append(nxt)
+            fans.append(fan)
+
+        if len(fans) <= 1: return False
+        orig_coords = self.vertices[v_idx].copy()
+        for i in range(1, len(fans)):
+            new_idx = self.n_vertices
+            self.vertices = np.vstack([self.vertices, orig_coords])
+            self.n_vertices += 1
+            for he in fans[i]:
+                f_idx = he.face
+                new_f = list(self._current_faces[f_idx])
+                for j in range(3):
+                    if new_f[j] == v_idx: new_f[j] = new_idx
+                self._current_faces[f_idx] = tuple(new_f)
+        self._build_half_edge_structure([list(f) for f in self._current_faces])
+        return True
+
+    def compute_cotangent_laplacian(self):
+        I, J, V_vals = [], [], []
+        faces = self.get_faces()
+        for f in faces:
+            for i_idx in range(3):
+                i, j, k = f[i_idx], f[(i_idx+1)%3], f[(i_idx+2)%3]
+                vi, vj, vk = self.vertices[i], self.vertices[j], self.vertices[k]
+                u, v = vi - vk, vj - vk
+                cot = 0.5 * np.dot(u, v) / max(np.linalg.norm(np.cross(u, v)), 1e-12)
+                I.extend([i, j, i, j]); J.extend([j, i, i, j]); V_vals.extend([-cot, -cot, cot, cot])
+        self.L = coo_matrix((V_vals, (I, J)), shape=(self.n_vertices, self.n_vertices)).tocsr()
+        return self.L
+
+    def flip_edge(self, u, v):
+        if (u, v) not in self.half_edges: return False
+        he = self.half_edges[(u, v)]
+        if not he.twin: return False
+        w, z = he.next.next.origin, he.twin.next.next.origin
+        # Link Condition
+        nu = {k[1] for k in self.half_edges.keys() if k[0] == u}
+        nv = {k[1] for k in self.half_edges.keys() if k[0] == v}
+        if len(nu & nv) != 2: return False
+        if (w, z) in self.half_edges or (z, w) in self.half_edges: return False
+
+        # Rewire
+        t = he.twin
+        hn, hp = he.next, he.next.next
+        tn, tp = t.next, t.next.next
+        he.origin, t.origin = z, w
+        he.next, hp.next, tn.next = hp, tn, he
+        t.next, tp.next, hn.next = tp, hn, t
+        tn.face, hn.face = he.face, t.face
+        del self.half_edges[(u, v)], self.half_edges[(v, u)]
+        self.half_edges[(z, w)], self.half_edges[(w, z)] = he, t
+        self._current_faces[he.face] = (z, hp.origin, hp.next.origin)
+        self._current_faces[t.face] = (w, tp.origin, tp.next.origin)
+        return True
