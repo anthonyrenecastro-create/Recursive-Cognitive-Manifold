@@ -171,6 +171,42 @@ class CollapseIntegrationTests(unittest.TestCase):
         self.assertEqual(snapshot["collapse_events"], len(manifold.collapse_memory))
         self.assertEqual(snapshot["attractor_initialized"], manifold.attractor_anchor is not None)
 
+    def test_autonomous_topology_repair_runs_without_manual_callback(self):
+        repair_config = CollapseConfig(
+            energy_threshold=0.05,
+            cooldown_steps=1,
+            anchor_update_rate=0.4,
+            minimum_rebind_alpha=0.2,
+            maximum_rebind_alpha=0.85,
+        )
+        install_collapse_attractor_support(
+            RecursiveCognitiveManifold,
+            config=repair_config,
+            auto_topology_repair=True,
+            max_auto_repairs=2,
+        )
+
+        manifold = RecursiveCognitiveManifold(state_dim=4)
+        manifold.add_node(0, [1.0, 1.0, 0.0, 0.0])
+        manifold.add_node(1, [1.0, 1.0, 0.0, 0.0])
+        manifold.connect(0, 1, strength=0.8, latency=1.0)
+
+        manifold.step({0: np.asarray([1.0, 1.0, 0.0, 0.0]), 1: np.asarray([1.0, 1.0, 0.0, 0.0])})
+        manifold.edges.pop((0, 1), None)
+        manifold.edges.pop((1, 0), None)
+
+        result = manifold.step({0: np.asarray([6.0, 6.0, 0.0, 0.0]), 1: np.asarray([6.0, 6.0, 0.0, 0.0])})
+
+        self.assertIn("autonomous_repair", result)
+        self.assertGreaterEqual(len(result["autonomous_repair"]), 1)
+        self.assertIn((0, 1), manifold.edges)
+        self.assertIn((1, 0), manifold.edges)
+        self.assertTrue(manifold.last_autonomous_repairs)
+
+        snapshot = manifold.snapshot()
+        self.assertIn("autonomous_repairs", snapshot)
+        self.assertGreaterEqual(len(snapshot["autonomous_repairs"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

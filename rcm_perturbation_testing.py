@@ -6,6 +6,8 @@ from enum import Enum
 
 import numpy as np
 
+from rcm.reproducibility import DEFAULT_SEED
+
 
 class NoiseType(str, Enum):
     GAUSSIAN = "gaussian"
@@ -343,4 +345,4 @@ def recovery_score(damaged_metrics, recovered_metrics):
     return float((0.5 * error_reduction) + (0.25 * node_recovery) + (0.25 * edge_recovery))
 
 
-lab = RCMPerturbationLab(seed=42)
+lab = RCMPerturbationLab(seed=DEFAULT_SEED)

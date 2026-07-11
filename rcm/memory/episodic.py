@@ -49,22 +49,56 @@ class EpisodicMemory:
             node.long_term_memory.append((time_step, node.local_state.copy(), node.energy))
         return episode
 
-    def retrieve(self, current_state, node_id: int | None = None):
-        best_match = None
-        best_similarity = -1.0
+    def retrieve(self, current_state, node_id: int | None = None, top_k: int = 5, min_similarity: float = 0.05):
+        scored = []
         for transition in self.transitions:
             if node_id is not None and transition["node_id"] != node_id:
                 continue
             similarity = self._state_similarity(current_state, transition["current_state"])
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_match = transition
+            if similarity < min_similarity:
+                continue
+            scored.append((similarity, transition))
 
-        if best_match is None:
+        if not scored:
             return None
 
-        recalled = dict(best_match)
-        recalled["similarity"] = best_similarity
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top_k = max(1, int(top_k))
+        selected = scored[:top_k]
+
+        weights = []
+        for similarity, transition in selected:
+            confidence = max(0.0, float(transition.get("outcome", {}).get("confidence", 0.5)))
+            weights.append(max(similarity, 0.0) * confidence)
+        weight_sum = float(np.sum(weights))
+        if weight_sum <= 0.0:
+            weights = np.ones(len(selected), dtype=float)
+            weight_sum = float(len(selected))
+        else:
+            weights = np.asarray(weights, dtype=float)
+
+        predicted_state = np.zeros_like(np.asarray(selected[0][1]["next_state"], dtype=float), dtype=float)
+        predicted_energy = 0.0
+        predicted_confidence = 0.0
+        mean_similarity = 0.0
+        for index, (similarity, transition) in enumerate(selected):
+            factor = float(weights[index] / weight_sum)
+            predicted_state += factor * np.asarray(transition["next_state"], dtype=float)
+            outcome = transition.get("outcome", {})
+            predicted_energy += factor * float(outcome.get("energy", 0.0))
+            predicted_confidence += factor * float(outcome.get("confidence", 0.5))
+            mean_similarity += factor * float(similarity)
+
+        best_similarity, best_transition = selected[0]
+        recalled = dict(best_transition)
+        recalled["next_state"] = predicted_state
+        recalled["outcome"] = {
+            "energy": predicted_energy,
+            "confidence": max(0.0, min(1.0, predicted_confidence)),
+        }
+        recalled["similarity"] = max(0.0, min(1.0, mean_similarity))
+        recalled["best_similarity"] = best_similarity
+        recalled["retrieval_count"] = len(selected)
         return recalled
 
     def _state_similarity(self, left, right) -> float:

@@ -1,9 +1,12 @@
+import argparse
+
 import numpy as np
 
 from rcm.experiments.specialization_demo import build_demo_manifold
 from rcm.experiments.specialization_demo import build_inputs
 from rcm.experiments.specialization_demo import canonical_regions
 from rcm.experiments.specialization_demo import collapse_runtime_summary
+from rcm.reproducibility import seed_everything
 
 
 def lesion_node(manifold, node_id: int):
@@ -13,14 +16,20 @@ def lesion_node(manifold, node_id: int):
 
 
 def main():
-    _, manifold = build_demo_manifold()
+    parser = argparse.ArgumentParser(description="Run lesion recovery on the Recursive Cognitive Manifold demo setup.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed used for deterministic manifold HRM fields.")
+    parser.add_argument("--steps", type=int, default=18, help="Number of steps to execute for recovery evaluation.")
+    args = parser.parse_args()
+
+    resolved_seed = seed_everything(args.seed)
+    _, manifold = build_demo_manifold(seed=resolved_seed)
     history = {
         "time": [],
         "collapse_energy": [],
         "collapse_flag": [],
         "regional_collapse_count": [],
     }
-    for step_index, external_input in enumerate(build_inputs(18)):
+    for step_index, external_input in enumerate(build_inputs(args.steps)):
         if step_index == 8:
             lesion_node(manifold, 2)
         manifold.step(external_input)

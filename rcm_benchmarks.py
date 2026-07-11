@@ -10,6 +10,7 @@ import tracemalloc
 import numpy as np
 
 import rcm.cognition.manifold as manifold_module
+from rcm.reproducibility import seed_everything
 from rcm_perturbation_testing import NoiseType
 from rcm_perturbation_testing import RCMPerturbationLab
 from rcm_perturbation_testing import capture_state
@@ -28,9 +29,9 @@ def _state_similarity(left, right):
 
 
 def _instantiate_manifold(factory, seed: int):
-    np.random.seed(seed)
+    resolved_seed = seed_everything(seed)
     try:
-        instance = factory(seed=seed)
+        instance = factory(seed=resolved_seed)
     except TypeError:
         instance = factory()
     if isinstance(instance, tuple):
@@ -252,7 +253,7 @@ def _to_json_safe(value):
     return value
 
 
-def run_benchmark_suite(factory, seed: int):
+def run_benchmark_suite(factory, seed: int, include_timestamp: bool = False):
     stimulus_a = np.array([1.0, 0.1, 0.0, 0.0], dtype=float)
     stimulus_b = np.array([0.0, 0.0, 1.0, 0.1], dtype=float)
     cue = np.array([0.8, 0.1, 0.0, 0.0], dtype=float)
@@ -274,6 +275,26 @@ def run_benchmark_suite(factory, seed: int):
             manifold.step({0: stimulus_a, 3: stimulus_b})
         region_stability = np.mean([region.stability for region in manifold.regions.values()] or [0.0])
         return region_stability + (0.5 * len(manifold.child_manifolds))
+
+    def geometry_feedback_task(manifold):
+        node_ids = sorted(manifold.nodes.keys())
+        for _ in range(10):
+            external_input = {}
+            if node_ids:
+                external_input[node_ids[0]] = stimulus_a
+            if len(node_ids) > 1:
+                external_input[node_ids[1]] = np.array([0.96, 0.18, 0.0, 0.0], dtype=float)
+            if len(node_ids) > 2:
+                external_input[node_ids[2]] = stimulus_b
+            if len(node_ids) > 3:
+                external_input[node_ids[3]] = np.array([0.0, 0.0, 0.92, 0.12], dtype=float)
+            manifold.step(external_input)
+
+        region_stability = float(np.mean([region.stability for region in manifold.regions.values()] or [0.0]))
+        semantic_count = float(len(manifold.semantic_memory.snapshot()))
+        child_count = float(len(manifold.child_manifolds))
+        sync_pressure = float(getattr(manifold, "last_field_metrics", {}).get("synchronization_pressure", 0.0))
+        return region_stability + (0.3 * semantic_count) + (0.5 * child_count) + (0.2 * sync_pressure)
 
     perturbation_lab = RCMPerturbationLab(seed=seed)
 
@@ -325,14 +346,18 @@ def run_benchmark_suite(factory, seed: int):
         "topology_recovery": topology_recovery(factory, seed, remove_fraction=0.25, recovery_steps=20),
         "computational_cost": computational_cost(factory, seed, steps=100),
         "ablation_sensitivity": ablation_sensitivity(factory, seed, ablation_task),
+        "geometry_feedback_gain": geometry_feedback_gain(factory, seed, geometry_feedback_task),
         "adversarial_regions": adversarial_runner.run(),
     }
 
+    metadata = {
+        "seed": int(seed),
+    }
+    if include_timestamp:
+        metadata["generated_at"] = datetime.now(timezone.utc).isoformat()
+
     return {
-        "metadata": {
-            "seed": int(seed),
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        },
+        "metadata": metadata,
         "benchmarks": benchmarks,
     }
 
@@ -385,6 +410,42 @@ def _disable_episodic(manifold):
     manifold._apply_episodic_recall = lambda updated_states: updated_states
     manifold.episodic_memory.record = lambda nodes, time_step: None
     return lambda: None
+
+
+def _disable_geometry_feedback(manifold):
+    manifold._apply_geometry_feedback = lambda edge_usage: setattr(
+        manifold,
+        "last_geometry_feedback",
+        {
+            "enabled": False,
+            "surgery_requests": [],
+            "surgery_attempted": [],
+            "surgery_applied": [],
+            "laplacian_energy": 0.0,
+        },
+    )
+    return lambda: None
+
+
+def geometry_feedback_gain(factory, seed: int, score_fn):
+    enabled_manifold = _instantiate_manifold(factory, seed)
+    enabled_score = float(score_fn(enabled_manifold))
+
+    disabled_manifold = _instantiate_manifold(factory, seed)
+    restore_fn = _disable_geometry_feedback(disabled_manifold)
+    try:
+        disabled_score = float(score_fn(disabled_manifold))
+    finally:
+        restore_fn()
+
+    delta = enabled_score - disabled_score
+    ratio = enabled_score / disabled_score if disabled_score != 0.0 else 0.0
+    return {
+        "enabled_score": enabled_score,
+        "disabled_score": disabled_score,
+        "gain_delta": delta,
+        "gain_ratio": ratio,
+    }
 
 
 def ablation_sensitivity(factory, seed: int, score_fn):
@@ -466,6 +527,7 @@ __all__ = [
     "catastrophic_interference",
     "compare_to_baseline",
     "computational_cost",
+    "geometry_feedback_gain",
     "hierarchy_utility",
     "memory_retention",
     "noise_recovery",

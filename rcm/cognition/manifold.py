@@ -5,6 +5,7 @@ import numpy as np
 from rcm.cognition.edge import CognitiveEdge
 from rcm.cognition.node import CognitiveNode
 from rcm.cognition.region import CognitiveRegion
+from rcm.dynamics.plasticity import request_simplicial_surgery
 from rcm.dynamics.plasticity import state_similarity
 from rcm.dynamics.plasticity import update_edge_dynamics
 from rcm.dynamics.propagation import propagate_states
@@ -38,11 +39,15 @@ class RecursiveCognitiveManifold:
             hrm_seed = 1000 if level == 0 else 2000 + level
         self.hrm_field = RegionalHRMField(seed=hrm_seed, state_dim=state_dim)
         self.last_child_field_metrics = []
+        self.geometry_complex = None
+        self.last_geometry_feedback = {}
+        self.last_semantic_guidance = {}
         self.time_step = 0
 
     @classmethod
-    def from_simplicial_complex(cls, complex_, state_dim: int = 4):
-        manifold = cls(state_dim=state_dim, level=0, label="node")
+    def from_simplicial_complex(cls, complex_, state_dim: int = 4, hrm_seed: int | None = None):
+        manifold = cls(state_dim=state_dim, level=0, label="node", hrm_seed=hrm_seed)
+        manifold.geometry_complex = complex_
         for node_id in range(complex_.n_vertices):
             coords = complex_.vertices[node_id][:state_dim]
             state = np.zeros(state_dim, dtype=float)
@@ -80,7 +85,9 @@ class RecursiveCognitiveManifold:
         self.episodic_memory.record(self.nodes, self.time_step)
         pruned_edges = update_edge_dynamics(self, edge_usage)
         self.structural_memory.record(self.time_step, self.edges, pruned_edges)
+        self._apply_geometry_feedback(edge_usage)
         self._update_regions()
+        self._apply_semantic_guidance()
         self._apply_regional_fields()
         self._apply_manifold_field()
         self.semantic_memory.observe(self)
@@ -168,9 +175,11 @@ class RecursiveCognitiveManifold:
             "region_count": len(self.regions),
             "episodic_events": len(self.episodic_memory.events),
             "semantic_motifs": self.semantic_memory.snapshot(),
+            "semantic_guidance": getattr(self, "last_semantic_guidance", {}),
             "child_manifolds": len(self.child_manifolds),
             "field_metrics": getattr(self, "last_field_metrics", {}),
             "child_field_metrics": getattr(self, "last_child_field_metrics", []),
+            "geometry_feedback": getattr(self, "last_geometry_feedback", {}),
         }
 
     def _record_topology_event(self, node_id: int, event: str):
@@ -307,6 +316,42 @@ class RecursiveCognitiveManifold:
     def _region_activation(self, component):
         return region_activation(self, component)
 
+    def _apply_semantic_guidance(self):
+        region_guidance = []
+        for signature, region in self.regions.items():
+            suggestion = self.semantic_memory.suggest_region_transition(self, signature, region)
+            if suggestion is None:
+                continue
+            guidance_vector = np.asarray(suggestion["guidance_vector"], dtype=float)
+            guidance_gain = float(suggestion["guidance_gain"])
+            confidence = float(suggestion["confidence"])
+
+            for node_id in signature:
+                if node_id not in self.nodes:
+                    continue
+                node = self.nodes[node_id]
+                width = min(len(node.local_state), len(guidance_vector))
+                node.local_state[:width] += guidance_gain * guidance_vector[:width]
+                node.confidence = min(1.0, node.confidence + 0.01 * confidence)
+
+            region.field_metrics["semantic_guidance_gain"] = guidance_gain
+            region.field_metrics["semantic_guidance_confidence"] = confidence
+            region_guidance.append(
+                {
+                    "region": tuple(int(node_id) for node_id in signature),
+                    "motif_signature": tuple(suggestion["motif_signature"]),
+                    "guidance_gain": guidance_gain,
+                    "confidence": confidence,
+                    "topology_alignment": float(suggestion["topology_alignment"]),
+                    "usage_count": int(suggestion["usage_count"]),
+                }
+            )
+
+        self.last_semantic_guidance = {
+            "enabled": True,
+            "region_guidance": region_guidance,
+        }
+
     def _state_similarity(self, left: np.ndarray, right: np.ndarray) -> float:
         return state_similarity(left, right)
 
@@ -393,6 +438,11 @@ class RecursiveCognitiveManifold:
                 node.local_state[:width] += 0.003 * sync_pressure * modulation[:width]
             child_manifold.last_field_metrics = result["metrics"]
             parent_region_map = getattr(child_manifold, "parent_region_map", {})
+            signature_to_meta = {
+                tuple(int(node_id) for node_id in signature): int(meta_id)
+                for meta_id, signature in parent_region_map.items()
+                if int(meta_id) in child_manifold.nodes
+            }
             for meta_id, parent_signature in parent_region_map.items():
                 if meta_id not in child_manifold.nodes or parent_signature not in self.regions:
                     continue
@@ -410,6 +460,30 @@ class RecursiveCognitiveManifold:
                 for edge in regional_edges:
                     edge.strength += 0.0015 * plasticity_pressure * (1.0 + edge.resonance)
                     edge.strength = max(0.0, min(1.0, edge.strength))
+                coupling_pressure = 0.0
+                for other_signature, other_meta_id in signature_to_meta.items():
+                    if other_signature == tuple(int(node_id) for node_id in parent_signature):
+                        continue
+                    forward = child_manifold.edges.get((meta_id, other_meta_id))
+                    backward = child_manifold.edges.get((other_meta_id, meta_id))
+                    if forward is None and backward is None:
+                        continue
+                    coupling = 0.0
+                    if forward is not None:
+                        coupling += forward.strength * (1.0 + forward.resonance)
+                    if backward is not None:
+                        coupling += backward.strength * (1.0 + backward.resonance)
+                    if forward is not None and backward is not None:
+                        coupling *= 0.5
+                    coupling_pressure += coupling
+                    for source_id in parent_region.node_ids:
+                        for target_id in other_signature:
+                            edge = self.edges.get((source_id, target_id))
+                            if edge is None:
+                                continue
+                            edge.strength += 0.0012 * plasticity_pressure * coupling
+                            edge.strength = max(0.0, min(1.0, edge.strength))
+                parent_region.field_metrics["child_feedback_coupling_pressure"] = coupling_pressure
                 parent_region.field_metrics["child_feedback_sync_pressure"] = sync_pressure
                 parent_region.field_metrics["child_feedback_plasticity_pressure"] = plasticity_pressure
                 feedback_metrics.append(
@@ -417,10 +491,79 @@ class RecursiveCognitiveManifold:
                         "parent_region": tuple(int(node_id) for node_id in parent_signature),
                         "sync_pressure": sync_pressure,
                         "plasticity_pressure": plasticity_pressure,
+                        "coupling_pressure": coupling_pressure,
                         "field_variance": result["field_variance"],
                     }
                 )
         self.last_child_field_metrics = feedback_metrics
+
+    def _apply_geometry_feedback(self, edge_usage):
+        complex_ = getattr(self, "geometry_complex", None)
+        if complex_ is None:
+            self.last_geometry_feedback = {
+                "enabled": False,
+                "surgery_requests": [],
+                "surgery_applied": [],
+                "laplacian_energy": 0.0,
+            }
+            return
+
+        requests = request_simplicial_surgery(self, edge_usage, max_requests=2)
+        attempted = []
+        applied = []
+        for request in requests:
+            source, target = request["edge"]
+            if source not in self.nodes or target not in self.nodes:
+                continue
+            attempted.append(
+                {
+                    "edge": (int(source), int(target)),
+                    "priority": float(request["priority"]),
+                }
+            )
+            if not complex_.flip_edge(source, target):
+                continue
+            applied.append(
+                {
+                    "edge": (int(source), int(target)),
+                    "priority": float(request["priority"]),
+                    "similarity": float(request["similarity"]),
+                    "usage": float(request["usage"]),
+                }
+            )
+            self._record_topology_event(source, f"surgery:flip:{source}->{target}")
+            self._record_topology_event(target, f"surgery:flip:{target}->{source}")
+
+        if applied:
+            complex_.compute_cotangent_laplacian()
+
+        laplacian_energy = 0.0
+        if hasattr(complex_, "L") and self.nodes:
+            ordered_ids = sorted(node_id for node_id in self.nodes if 0 <= int(node_id) < complex_.n_vertices)
+            if ordered_ids:
+                state_matrix = np.stack([self.nodes[node_id].local_state for node_id in ordered_ids], axis=0)
+                laplacian = complex_.L[ordered_ids, :][:, ordered_ids].dot(state_matrix)
+                laplacian_energy = float(np.mean(np.linalg.norm(laplacian, axis=1)))
+                for row_index, node_id in enumerate(ordered_ids):
+                    node = self.nodes[node_id]
+                    width = min(len(node.local_state), laplacian.shape[1])
+                    node.local_state[:width] -= 0.002 * laplacian[row_index, :width]
+
+        self.last_geometry_feedback = {
+            "enabled": True,
+            "surgery_requests": [
+                {
+                    "edge": (int(item["edge"][0]), int(item["edge"][1])),
+                    "priority": float(item["priority"]),
+                    "similarity": float(item["similarity"]),
+                    "usage": float(item["usage"]),
+                }
+                for item in requests
+            ],
+            "surgery_attempted": attempted,
+            "surgery_applied": applied,
+            "laplacian_energy": laplacian_energy,
+        }
 
     def _region_edge_stats(self, node_ids):
         node_set = set(node_ids)

@@ -467,6 +467,8 @@ def install_collapse_attractor_support(
     monitor_regions: bool = True,
     monitor_children: bool = True,
     auto_rebind: bool = True,
+    auto_topology_repair: bool = True,
+    max_auto_repairs: int = 2,
     dt: float = 1.0,
 ) -> type:
     """Install collapse diagnostics into RecursiveCognitiveManifold once.
@@ -492,6 +494,7 @@ def install_collapse_attractor_support(
         self.last_collapse_metrics: Dict[str, Any] = {}
         self.region_collapse_metrics: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         self.child_collapse_metrics: List[Dict[str, Any]] = []
+        self.last_autonomous_repairs: List[Dict[str, Any]] = []
 
     @functools.wraps(original_step)
     def wrapped_step(
@@ -575,11 +578,38 @@ def install_collapse_attractor_support(
                 child.last_collapse_metrics = child_metrics
                 self.child_collapse_metrics.append(child_metrics)
 
+        self.last_autonomous_repairs = []
+        should_attempt_repair = bool(self.collapse_flag)
+        if not should_attempt_repair and self.region_collapse_metrics:
+            should_attempt_repair = any(bool(metrics.get("collapse_flag", False)) for metrics in self.region_collapse_metrics.values())
+        if not should_attempt_repair and hasattr(self, "_expected_edge_strengths"):
+            try:
+                expected_edges = self._expected_edge_strengths(repair_decay_horizon=8)
+                should_attempt_repair = any(
+                    edge_key not in self.edges
+                    and edge_key[0] in self.nodes
+                    and edge_key[1] in self.nodes
+                    for edge_key in expected_edges.keys()
+                )
+            except Exception:
+                should_attempt_repair = False
+        if auto_topology_repair and should_attempt_repair and hasattr(self, "attempt_topology_repair"):
+            try:
+                self.last_autonomous_repairs = list(
+                    self.attempt_topology_repair(
+                        max_repairs=max_auto_repairs,
+                        similarity_threshold=0.0,
+                    )
+                )
+            except Exception:
+                self.last_autonomous_repairs = []
+
         if isinstance(result, dict):
             result = dict(result)
             result["collapse"] = self.last_collapse_metrics
             result["region_collapse"] = self.region_collapse_metrics
             result["child_collapse"] = self.child_collapse_metrics
+            result["autonomous_repair"] = list(self.last_autonomous_repairs)
         return result
 
     @functools.wraps(original_snapshot)
@@ -590,6 +620,7 @@ def install_collapse_attractor_support(
         snapshot["collapse_energy"] = float(getattr(self, "collapse_energy", 0.0))
         snapshot["collapse_events"] = len(getattr(self, "collapse_memory", []))
         snapshot["attractor_initialized"] = getattr(self, "attractor_anchor", None) is not None
+        snapshot["autonomous_repairs"] = list(getattr(self, "last_autonomous_repairs", []))
         return snapshot
 
     manifold_class.__init__ = wrapped_init

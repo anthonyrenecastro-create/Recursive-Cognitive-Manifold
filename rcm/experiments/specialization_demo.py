@@ -11,6 +11,8 @@ import numpy as np
 
 from rcm.cognition.manifold import RecursiveCognitiveManifold
 from rcm.geometry.simplicial_complex import DynamicSimplicialComplex
+from rcm.reproducibility import normalize_seed
+from rcm.reproducibility import seed_everything
 from rcm_collapse_integration import install_collapse_attractor_support
 
 
@@ -37,7 +39,8 @@ TRACKED_EDGES = [
 ]
 
 
-def build_demo_manifold():
+def build_demo_manifold(seed: int = 42):
+    seed = normalize_seed(seed)
     vertices = np.array([
         [0.0, 0.0],
         [1.0, 0.0],
@@ -51,7 +54,7 @@ def build_demo_manifold():
         [3, 4, 5],
     ])
     complex_ = DynamicSimplicialComplex(vertices, faces)
-    manifold = RecursiveCognitiveManifold.from_simplicial_complex(complex_, state_dim=4)
+    manifold = RecursiveCognitiveManifold.from_simplicial_complex(complex_, state_dim=4, hrm_seed=seed)
     manifold.connect(2, 3, strength=0.32, latency=2.4)
     manifold.connect(1, 4, strength=0.28, latency=2.8)
     return vertices, manifold
@@ -320,9 +323,10 @@ def render_mp4_from_frames(frames_dir, output_path, fps):
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
-def run_demo(steps, capture_frames=False):
-    vertices, manifold = build_demo_manifold()
-    _, initial_manifold = build_demo_manifold()
+def run_demo(steps, capture_frames=False, seed: int = 42):
+    seed = normalize_seed(seed)
+    vertices, manifold = build_demo_manifold(seed=seed)
+    _, initial_manifold = build_demo_manifold(seed=seed)
     history = {
         "time": [],
         "region_count": [],
@@ -361,6 +365,7 @@ def run_demo(steps, capture_frames=False):
 def build_parser():
     parser = argparse.ArgumentParser(description="Visualize recursive cognitive manifold specialization and rewiring.")
     parser.add_argument("--steps", type=int, default=18, help="Number of deterministic update steps to simulate.")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed used for deterministic manifold HRM fields.")
     parser.add_argument("--output", type=Path, default=Path("artifacts/recursive_cognitive_manifold_demo.png"), help="Path to the output visualization image.")
     parser.add_argument("--animation", choices=["none", "frames", "mp4"], default="none", help="Emit a frame sequence or mp4 from the same deterministic run.")
     parser.add_argument("--frames-dir", type=Path, default=Path("artifacts/frames"), help="Directory used for animation frame output.")
@@ -371,8 +376,13 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    resolved_seed = seed_everything(args.seed)
     capture_frames = args.animation in {"frames", "mp4"}
-    vertices, initial_manifold, final_manifold, history, frame_manifolds = run_demo(args.steps, capture_frames=capture_frames)
+    vertices, initial_manifold, final_manifold, history, frame_manifolds = run_demo(
+        args.steps,
+        capture_frames=capture_frames,
+        seed=resolved_seed,
+    )
     render_figure(vertices, initial_manifold, final_manifold, history, args.output)
 
     if args.animation in {"frames", "mp4"}:

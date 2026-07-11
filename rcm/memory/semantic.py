@@ -62,6 +62,38 @@ class SemanticMemory:
             for signature, prototype in self.prototypes.items()
         }
 
+    def suggest_region_transition(self, manifold, signature, region, minimum_usage: int = 2):
+        motif_signature = (region.specialization, len(signature))
+        prototype = self.prototypes.get(motif_signature)
+        if prototype is None:
+            return None
+        if prototype.usage_count < max(1, int(minimum_usage)):
+            return None
+
+        current_activation = manifold._region_activation(list(signature))
+        predicted_activation = prototype.prototype_activation + prototype.expected_transition
+        guidance_vector = predicted_activation - current_activation
+
+        pattern = prototype.topological_pattern
+        expected_internal = float(pattern.get("mean_internal_strength", 0.0))
+        expected_external = float(pattern.get("mean_external_strength", 0.0))
+        current_pattern = self._topological_pattern(manifold, signature)
+        internal_error = abs(current_pattern["mean_internal_strength"] - expected_internal)
+        external_error = abs(current_pattern["mean_external_strength"] - expected_external)
+        topology_alignment = max(0.0, 1.0 - (0.5 * internal_error + 0.5 * external_error))
+
+        confidence = float(np.clip(prototype.confidence, 0.0, 1.0))
+        guidance_gain = float(np.clip(0.05 + 0.25 * confidence + 0.10 * topology_alignment, 0.0, 0.35))
+        return {
+            "motif_signature": motif_signature,
+            "predicted_activation": predicted_activation,
+            "guidance_vector": guidance_vector,
+            "guidance_gain": guidance_gain,
+            "confidence": confidence,
+            "topology_alignment": topology_alignment,
+            "usage_count": prototype.usage_count,
+        }
+
     def _topological_pattern(self, manifold, signature):
         internal_strengths = []
         external_strengths = []

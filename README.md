@@ -10,6 +10,45 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+## Installation
+
+Reference environment:
+
+- Python 3.12+
+- Linux/macOS/WSL (validated in Ubuntu CI)
+
+Recommended local install flow:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Quick validation after installation:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -p 'test_*.py'
+PYTHONDONTWRITEBYTECODE=1 python -m rcm.experiments.benchmark_suite --seed 42
+```
+
+## Reproducibility
+
+All primary entry points expose deterministic seed controls:
+
+- `python demo_driver.py --seed 42 --output artifacts/demo_seed_42.png`
+- `python -m rcm.experiments.lesion_recovery --seed 42 --steps 18`
+- `python -m rcm.experiments.benchmark_suite --seed 42 --output artifacts/benchmarks/benchmark_report_seed_42.json`
+
+Benchmark reports default to deterministic metadata (`seed` only). To include wall-clock generation time for ad-hoc profiling runs:
+
+```bash
+python -m rcm.experiments.benchmark_suite --seed 42 --include-timestamp
+```
+
+Performance metrics (latency and memory) may vary by hardware and runtime environment; correctness metrics should remain stable under fixed seeds.
+
 ## CI-Friendly Test Commands
 
 These commands are safe for headless CI runs and avoid polluting the repository with bytecode.
@@ -36,6 +75,66 @@ Run the lesion recovery experiment with visible collapse diagnostics:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m rcm.experiments.lesion_recovery
+```
+
+Run the benchmark suite with deterministic metadata:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python -m rcm.experiments.benchmark_suite --seed 42 --output artifacts/benchmarks/ci_benchmark_report.json
+```
+
+Interpret geometry feedback metric in benchmark JSON:
+
+- `benchmarks.geometry_feedback_gain.enabled_score`: workload score with geometry feedback active
+- `benchmarks.geometry_feedback_gain.disabled_score`: same workload score with geometry feedback disabled
+- `benchmarks.geometry_feedback_gain.gain_delta`: additive gain (`enabled_score - disabled_score`)
+- `benchmarks.geometry_feedback_gain.gain_ratio`: relative gain (`enabled_score / disabled_score`)
+- Positive delta or ratio > 1.0 indicates net benefit from geometry feedback for that benchmark run.
+
+## CI Pipeline
+
+The repository includes a GitHub Actions workflow at `.github/workflows/ci.yml` that executes:
+
+- dependency installation
+- compile validation
+- unit tests
+- benchmark suite execution
+- benchmark metadata validation
+- headless demo smoke run
+
+This aligns local validation with CI to reduce release drift.
+
+## Architecture
+
+### Module Layers
+
+```mermaid
+flowchart TD
+	A[Experiments and Drivers] --> B[Cognition Core]
+	A --> C[Benchmarks and Perturbation]
+	B --> D[Dynamics]
+	B --> E[Memory]
+	B --> F[Hierarchy]
+	B --> G[Geometry]
+	C --> B
+	H[Persistence and Collapse Integration] --> B
+```
+
+### Runtime Update Flow
+
+```mermaid
+flowchart LR
+	I[External Input] --> J[Propagation]
+	J --> K[Episodic Recall Blend]
+	K --> L[Synchronization]
+	L --> M[Structural Plasticity]
+	M --> N[Region Update]
+	N --> O[Regional HRM Fields]
+	O --> P[Manifold HRM Field]
+	P --> Q[Semantic Observation]
+	Q --> R[Child Manifold Refresh]
+	R --> S[Child Feedback Fields]
+	S --> T[Snapshot and Diagnostics]
 ```
 
 ## Collapse Diagnostics Workflow
