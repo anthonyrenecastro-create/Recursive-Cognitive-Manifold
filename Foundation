@@ -4,6 +4,9 @@ from matplotlib.tri import Triangulation
 from scipy.spatial import Delaunay
 from scipy.sparse import coo_matrix
 from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from itertools import combinations
+from typing import Dict, List, Optional, Tuple
 import time
 
 class HalfEdge:
@@ -187,3 +190,284 @@ class DynamicSimplicialComplex:
         self._current_faces[he.face] = (z, hp.origin, hp.next.origin)
         self._current_faces[t.face] = (w, tp.origin, tp.next.origin)
         return True
+
+
+@dataclass
+class CognitiveNode:
+    local_state: np.ndarray
+    short_term_memory: deque = field(default_factory=lambda: deque(maxlen=8))
+    long_term_memory: deque = field(default_factory=lambda: deque(maxlen=32))
+    synchronization_state: float = 0.0
+    energy: float = 1.0
+    confidence: float = 0.5
+    topology_history: deque = field(default_factory=lambda: deque(maxlen=16))
+    specialization: str = "undifferentiated"
+
+
+@dataclass
+class CognitiveEdge:
+    strength: float = 0.5
+    latency: float = 1.0
+    resonance: float = 0.0
+    age: int = 0
+    traversal_frequency: int = 0
+
+
+@dataclass
+class CognitiveRegion:
+    node_ids: Tuple[int, ...]
+    specialization: str
+    activation_trace: deque = field(default_factory=lambda: deque(maxlen=16))
+    stability: float = 0.0
+
+
+class RecursiveCognitiveManifold:
+    def __init__(self, state_dim: int = 4, level: int = 0, label: str = "node"):
+        self.state_dim = state_dim
+        self.level = level
+        self.label = label
+        self.nodes: Dict[int, CognitiveNode] = {}
+        self.edges: Dict[Tuple[int, int], CognitiveEdge] = {}
+        self.regions: Dict[Tuple[int, ...], CognitiveRegion] = {}
+        self.episodic_memory = deque(maxlen=64)
+        self.semantic_memory = defaultdict(int)
+        self.structural_memory = deque(maxlen=64)
+        self.child_manifolds: List[RecursiveCognitiveManifold] = []
+        self.time_step = 0
+
+    @classmethod
+    def from_simplicial_complex(cls, complex_: DynamicSimplicialComplex, state_dim: int = 4):
+        manifold = cls(state_dim=state_dim, level=0, label="node")
+        for node_id in range(complex_.n_vertices):
+            coords = complex_.vertices[node_id][:state_dim]
+            state = np.zeros(state_dim, dtype=float)
+            state[:len(coords)] = coords
+            manifold.add_node(node_id, state)
+
+        for u, v in {tuple(sorted(edge)) for edge in complex_.half_edges.keys()}:
+            distance = np.linalg.norm(complex_.vertices[u] - complex_.vertices[v])
+            manifold.connect(u, v, strength=1.0 / (1.0 + distance), latency=1.0 + distance)
+        return manifold
+
+    def add_node(self, node_id: int, local_state: Optional[np.ndarray] = None):
+        if local_state is None:
+            local_state = np.zeros(self.state_dim, dtype=float)
+        self.nodes[node_id] = CognitiveNode(local_state=np.asarray(local_state, dtype=float))
+
+    def connect(self, source: int, target: int, strength: float = 0.5, latency: float = 1.0):
+        edge = CognitiveEdge(strength=float(strength), latency=float(latency))
+        self.edges[(source, target)] = edge
+        self.edges[(target, source)] = CognitiveEdge(strength=edge.strength, latency=edge.latency)
+        self._record_topology_event(source, f"link:{source}->{target}")
+        self._record_topology_event(target, f"link:{target}->{source}")
+
+    def stimulate(self, node_id: int, signal):
+        if node_id not in self.nodes:
+            raise KeyError(f"Unknown node_id: {node_id}")
+        signal = np.asarray(signal, dtype=float)
+        node = self.nodes[node_id]
+        node.local_state = self._fit_state(signal)
+        node.energy = min(1.5, node.energy + 0.2)
+        node.confidence = min(1.0, node.confidence + 0.05)
+        node.short_term_memory.append(node.local_state.copy())
+
+    def step(self, external_input: Optional[Dict[int, np.ndarray]] = None):
+        if external_input:
+            for node_id, signal in external_input.items():
+                self.stimulate(node_id, signal)
+
+        updated_states = {}
+        edge_usage = defaultdict(int)
+        for node_id, node in self.nodes.items():
+            incoming = []
+            for (source, target), edge in self.edges.items():
+                if target != node_id:
+                    continue
+                source_state = self.nodes[source].local_state
+                signal = source_state * edge.strength * (1.0 + edge.resonance)
+                incoming.append(signal / edge.latency)
+                edge.traversal_frequency += 1
+                edge.age += 1
+                edge_usage[(source, target)] += 1
+
+            if incoming:
+                aggregate = np.mean(incoming, axis=0)
+                updated_states[node_id] = 0.6 * node.local_state + 0.4 * aggregate
+            else:
+                updated_states[node_id] = node.local_state.copy()
+
+        for node_id, new_state in updated_states.items():
+            node = self.nodes[node_id]
+            node.local_state = new_state
+            node.short_term_memory.append(new_state.copy())
+            node.energy = float(np.clip(node.energy * 0.97 + np.linalg.norm(new_state) * 0.03, 0.0, 2.0))
+            node.confidence = float(np.clip(self._coherence(node.short_term_memory), 0.0, 1.0))
+
+        self._update_episodic_memory()
+        self._update_structural_memory(edge_usage)
+        self._update_regions()
+        self._update_semantic_memory()
+        self.time_step += 1
+        return self.snapshot()
+
+    def snapshot(self):
+        return {
+            "level": self.level,
+            "label": self.label,
+            "time_step": self.time_step,
+            "node_count": len(self.nodes),
+            "edge_count": len(self.edges),
+            "region_count": len(self.regions),
+            "episodic_events": len(self.episodic_memory),
+            "semantic_motifs": dict(self.semantic_memory),
+            "child_manifolds": len(self.child_manifolds),
+        }
+
+    def _record_topology_event(self, node_id: int, event: str):
+        if node_id in self.nodes:
+            self.nodes[node_id].topology_history.append((self.time_step, event))
+
+    def _fit_state(self, signal: np.ndarray) -> np.ndarray:
+        state = np.zeros(self.state_dim, dtype=float)
+        signal = signal[:self.state_dim]
+        state[:len(signal)] = signal
+        return state
+
+    def _coherence(self, memory: deque) -> float:
+        if len(memory) < 2:
+            return 0.5
+        stack = np.vstack(memory)
+        variance = float(np.mean(np.var(stack, axis=0)))
+        return 1.0 / (1.0 + variance)
+
+    def _update_episodic_memory(self):
+        episode = {
+            "time_step": self.time_step,
+            "activations": {node_id: node.local_state.copy() for node_id, node in self.nodes.items()},
+            "energy": {node_id: node.energy for node_id, node in self.nodes.items()},
+        }
+        self.episodic_memory.append(episode)
+        for node in self.nodes.values():
+            node.long_term_memory.append((self.time_step, node.local_state.copy(), node.energy))
+
+    def _update_structural_memory(self, edge_usage):
+        pruned_edges = []
+        for (source, target), edge in list(self.edges.items()):
+            source_node = self.nodes[source]
+            target_node = self.nodes[target]
+            similarity = self._state_similarity(source_node.local_state, target_node.local_state)
+            edge.resonance = 0.7 * edge.resonance + 0.3 * similarity
+            reinforcement = 0.05 * similarity + 0.01 * edge_usage[(source, target)]
+            decay = 0.02 if similarity < 0.15 else 0.0
+            edge.strength = float(np.clip(edge.strength + reinforcement - decay, 0.0, 2.0))
+            if edge.strength < 0.05 and edge.age > 3:
+                pruned_edges.append((source, target))
+
+        for edge_key in pruned_edges:
+            del self.edges[edge_key]
+            self._record_topology_event(edge_key[0], f"prune:{edge_key[0]}->{edge_key[1]}")
+
+        self.structural_memory.append({
+            "time_step": self.time_step,
+            "edge_strengths": {edge_key: edge.strength for edge_key, edge in self.edges.items()},
+            "pruned_edges": pruned_edges,
+        })
+
+    def _update_regions(self):
+        adjacency = defaultdict(set)
+        for source, target in self.edges:
+            if self.edges[(source, target)].strength >= 0.25:
+                adjacency[source].add(target)
+
+        visited = set()
+        regions = {}
+        for node_id in self.nodes:
+            if node_id in visited:
+                continue
+            component = []
+            queue = deque([node_id])
+            visited.add(node_id)
+            while queue:
+                current = queue.popleft()
+                component.append(current)
+                for neighbor in adjacency[current]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+
+            signature = tuple(sorted(component))
+            specialization = self._infer_specialization(component)
+            region = self.regions.get(signature, CognitiveRegion(signature, specialization))
+            region.specialization = specialization
+            region.activation_trace.append(self._region_activation(component))
+            region.stability = self._coherence(region.activation_trace)
+            regions[signature] = region
+            for member in component:
+                self.nodes[member].specialization = specialization
+
+        self.regions = regions
+
+    def _infer_specialization(self, component: List[int]) -> str:
+        if not component:
+            return "undifferentiated"
+        states = np.vstack([self.nodes[node_id].local_state for node_id in component])
+        dominant_axis = int(np.argmax(np.mean(np.abs(states), axis=0)))
+        labels = ["sensorimotor", "associative", "predictive", "integrative"]
+        return labels[dominant_axis % len(labels)]
+
+    def _region_activation(self, component: List[int]) -> np.ndarray:
+        return np.mean([self.nodes[node_id].local_state for node_id in component], axis=0)
+
+    def _update_semantic_memory(self):
+        for signature, region in self.regions.items():
+            motif = (region.specialization, len(signature), round(region.stability, 2))
+            self.semantic_memory[motif] += 1
+
+        stable_regions = [
+            signature for signature, region in self.regions.items()
+            if len(signature) > 1 and region.stability > 0.85
+        ]
+        if stable_regions:
+            abstracted = self._abstract_regions(stable_regions)
+            if self.child_manifolds:
+                self.child_manifolds[0] = abstracted
+            else:
+                self.child_manifolds.append(abstracted)
+        else:
+            self.child_manifolds.clear()
+
+    def _abstract_regions(self, stable_regions: List[Tuple[int, ...]]):
+        meta = RecursiveCognitiveManifold(state_dim=self.state_dim, level=self.level + 1, label=f"meta-{self.label}")
+        region_to_meta = {}
+        for meta_id, signature in enumerate(stable_regions):
+            region = self.regions[signature]
+            region_state = self._region_activation(list(signature))
+            meta.add_node(meta_id, region_state)
+            meta.nodes[meta_id].specialization = region.specialization
+            meta.nodes[meta_id].confidence = region.stability
+            region_to_meta[signature] = meta_id
+
+        for left, right in combinations(stable_regions, 2):
+            coupling = self._cross_region_coupling(left, right)
+            if coupling > 0.2:
+                meta.connect(region_to_meta[left], region_to_meta[right], strength=coupling, latency=max(0.5, 1.5 - coupling))
+
+        return meta
+
+    def _cross_region_coupling(self, left: Tuple[int, ...], right: Tuple[int, ...]) -> float:
+        weights = []
+        for source in left:
+            for target in right:
+                edge = self.edges.get((source, target))
+                if edge is not None:
+                    weights.append(edge.strength * (1.0 + edge.resonance))
+        if not weights:
+            return 0.0
+        return float(np.mean(weights))
+
+    def _state_similarity(self, left: np.ndarray, right: np.ndarray) -> float:
+        left_norm = np.linalg.norm(left)
+        right_norm = np.linalg.norm(right)
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return float(np.dot(left, right) / (left_norm * right_norm))
